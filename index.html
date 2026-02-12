@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>OmniPath AI | Pro Warehouse V1.0</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+    <style>
+        :root { --red: #ed1c24; --blue: #007bff; --bg: #0a0a0c; --panel: rgba(20, 20, 25, 0.95); }
+        body { margin: 0; background: var(--bg); color: white; font-family: 'Segoe UI', Tahoma, sans-serif; overflow: hidden; }
+        
+        /* Left Control Panel */
+        #panel { position: absolute; top: 20px; left: 20px; z-index: 10; width: 320px; background: var(--panel); padding: 20px; border-radius: 12px; border: 1px solid #333; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        
+        /* Stats & Counters */
+        .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 15px 0; }
+        .stat-card { background: #1a1a20; padding: 10px; border-radius: 6px; border-left: 3px solid var(--red); }
+        .stat-card.blue { border-left-color: var(--blue); }
+        .label { font-size: 10px; color: #888; text-transform: uppercase; }
+        .val { font-size: 18px; font-weight: bold; display: block; }
+        
+        /* Battery Bars */
+        .bat-container { height: 4px; background: #333; margin-top: 5px; border-radius: 2px; }
+        .bat-fill { height: 100%; transition: width 0.3s; }
+
+        /* Input & Log */
+        input { width: 98%; padding: 12px 1%; background: #111; border: 1px solid #444; color: white; border-radius: 4px; margin-bottom: 10px; }
+        button { width: 100%; padding: 12px; background: var(--red); color: white; border: none; font-weight: bold; cursor: pointer; border-radius: 4px; }
+        
+        /* Live Brain Terminal (Right Side) */
+        #terminal { position: absolute; top: 20px; right: 20px; width: 300px; height: 300px; background: rgba(0,0,0,0.8); border: 1px solid #00ff0033; border-radius: 8px; font-family: 'Courier New', monospace; padding: 15px; font-size: 11px; color: #00ff00; overflow-y: auto; pointer-events: none; }
+        .log-entry { margin-bottom: 8px; border-bottom: 1px solid #00ff0011; padding-bottom: 4px; }
+    </style>
+    <script type="importmap"> { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } } </script>
+</head>
+<body>
+
+    <div id="panel">
+        <h2 style="margin:0; font-size:1.2em; letter-spacing:2px;">OMNIPATH <span style="font-weight:100">FLEET</span></h2>
+        
+        <div class="stat-grid">
+            <div class="stat-card">
+                <span class="label">Red Bot Power</span>
+                <span class="val"><span id="rb-pct">100</span>%</span>
+                <div class="bat-container"><div id="rb-bar" class="bat-fill" style="width:100%; background:var(--red)"></div></div>
+            </div>
+            <div class="stat-card blue">
+                <span class="label">Blue Bot Power</span>
+                <span class="val"><span id="bb-pct">100</span>%</span>
+                <div class="bat-container"><div id="bb-bar" class="bat-fill" style="width:100%; background:var(--blue)"></div></div>
+            </div>
+        </div>
+
+        <div style="background:#111; padding:10px; border-radius:6px; margin-bottom:15px;">
+            <span class="label">Inventory Delivered</span>
+            <span class="val" id="inv-count">0 Units</span>
+        </div>
+
+        <input type="text" id="cmd" placeholder="Command (e.g. Red fetch from dock)">
+        <button id="exec">DISPATCH MISSION</button>
+    </div>
+
+    <div id="terminal">--- SYSTEM READY ---<br>Awaiting AI Sequence...</div>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- 1. CORE SCENE ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        camera.position.set(14, 14, 14);
+        camera.lookAt(0,0,0);
+
+        // Environment
+        scene.add(new THREE.GridHelper(12, 12, 0x333333, 0x111111));
+        const shelf = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 3), new THREE.MeshStandardMaterial({color: 0x224422}));
+        shelf.position.y = 1;
+        scene.add(shelf);
+        scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+
+        const locations = { "loading_dock": {x:-4, z:-4}, "storage_a": {x:4, z:-4}, "storage_b": {x:4, z:4}, "shipping_bay": {x:-4, z:4} };
+
+        // --- 2. FLEET & DATA ---
+        let battery = { red_bot: 100, blue_bot: 100 };
+        let totalDelivered = 0;
+        const cargo = { red_bot: null, blue_bot: null };
+
+        const createBot = (col) => {
+            const b = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.4, 0.7), new THREE.MeshStandardMaterial({color: col}));
+            b.position.y = 0.2;
+            return b;
+        };
+        const redBot = createBot(0xed1c24);
+        const blueBot = createBot(0x007bff);
+        redBot.position.set(-4, 0.2, -4);
+        blueBot.position.set(-4, 0.2, 4);
+        scene.add(redBot, blueBot);
+
+        const fleet = { "red_bot": redBot, "blue_bot": blueBot };
+
+        // --- 3. SYSTEM FUNCTIONS ---
+        function writeToTerminal(msg) {
+            const term = document.getElementById('terminal');
+            term.innerHTML = `<div class="log-entry">> ${msg}</div>` + term.innerHTML;
+        }
+
+        function updateUI() {
+            document.getElementById('rb-pct').innerText = Math.floor(battery.red_bot);
+            document.getElementById('rb-bar').style.width = battery.red_bot + "%";
+            document.getElementById('bb-pct').innerText = Math.floor(battery.blue_bot);
+            document.getElementById('bb-bar').style.width = battery.blue_bot + "%";
+            document.getElementById('inv-count').innerText = totalDelivered + " Units";
+        }
+
+        function handleCargo(botId, action) {
+            const bot = fleet[botId];
+            if (action === "pick_up" && !cargo[botId]) {
+                const crate = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.45, 0.45), new THREE.MeshStandardMaterial({color: 0xffa500}));
+                crate.position.set(0, 0.5, 0);
+                bot.add(crate);
+                cargo[botId] = crate;
+                writeToTerminal(`${botId.toUpperCase()} attached cargo.`);
+            } else if (action === "drop_off" && cargo[botId]) {
+                const crate = cargo[botId];
+                const pos = new THREE.Vector3();
+                crate.getWorldPosition(pos);
+                scene.add(crate);
+                crate.position.copy(pos); crate.position.y = 0.22;
+                bot.remove(crate);
+                cargo[botId] = null;
+                totalDelivered++;
+                updateUI();
+                writeToTerminal(`${botId.toUpperCase()} delivered cargo.`);
+            }
+        }
+
+        async function askAI() {
+            const prompt = document.getElementById('cmd').value;
+            writeToTerminal(`AI Brain Processing: "${prompt}"`);
+            
+            try {
+                const res = await fetch('http://149.28.64.112:8000/dispatch', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ prompt, battery })
+                });
+                const data = await res.json();
+                
+                data.dispatch_list.forEach(mission => {
+                    const id = mission.robot_id.toLowerCase().trim().replace(" ", "_");
+                    const bot = fleet[id];
+                    if (!bot) return;
+
+                    const tl = gsap.timeline();
+                    let vX = bot.position.x, vZ = bot.position.z;
+
+                    mission.steps.forEach(step => {
+                        const loc = locations[step.target_location.toLowerCase().trim().replace(" ", "_")];
+                        if (loc) {
+                            const tX = loc.x + (id === "red_bot" ? -0.8 : 0.8), tZ = loc.z;
+                            
+                            // Obstacle Avoidance
+                            if (Math.sign(vX) !== Math.sign(tX) && Math.sign(vZ) !== Math.sign(tZ)) {
+                                tl.to(bot.position, { x: vX, z: vZ > 0 ? 5 : -5, duration: 1 });
+                                tl.to(bot.position, { x: 0, z: vZ > 0 ? 5 : -5, duration: 0.5 });
+                            }
+
+                            tl.to(bot.position, { x: tX, z: tZ, duration: 2, 
+                                onStart: () => writeToTerminal(`${id}: ${step.reasoning}`),
+                                onUpdate: () => { battery[id] -= 0.03; updateUI(); },
+                                onComplete: () => {
+                                    handleCargo(id, step.load_action);
+                                    if(step.target_location === "loading_dock") battery[id] = 100; // Fast charge
+                                }
+                            });
+                            vX = tX; vZ = tZ;
+                        }
+                    });
+                });
+            } catch (e) { 
+    if (e.message.includes('429')) {
+        writeToTerminal("ERR: API Limit Hit. Wait 60s.");
+    } else {
+        writeToTerminal("ERR: Brain Offline (Check Console)");
+    }
+    console.error(e);
+}
+        }
+
+        document.getElementById('exec').onclick = askAI;
+        function animate() { requestAnimationFrame(animate); renderer.render(scene, camera); }
+        animate();
+    </script>
+</body>
+</html>
